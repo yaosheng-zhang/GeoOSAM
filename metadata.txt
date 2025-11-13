@@ -1,0 +1,110 @@
+[general]
+name=GeoOSAM
+qgisMinimumVersion=3.16
+qgisMaximumVersion=3.99
+description=Advanced segmentation tool with intelligent SAM 2.1/Ultralytics SAM2.1_B selection, exceptional CPU performance (<1s on 24+ cores), GPU acceleration, threading, and professional workflow features
+about=GeoOSAM brings Meta's latest Segment Anything Model (SAM 2.1) and Ultralytics SAM2.1_B to QGIS with intelligent hardware optimization. Features automatic model selection: SAM 2.1 for GPU systems (CUDA/Apple Silicon) and Ultralytics SAM2.1_B for CPU-only systems, providing 5-10x performance improvements. Ultralytics automatically handles SAM2.1_B downloads for seamless CPU setup. Includes GPU/CPU acceleration with automatic device detection, multi-threaded processing for responsive UI, Point and BBox segmentation modes, 12 pre-defined classes (Buildings, Roads, Vegetation, Water, Vehicle, Ship, etc.) plus custom class creation, Undo functionality for mistake correction, Custom output folder selection, Optional debug mask saving, Automatic raster layer re-selection, Professional shapefile export with detailed attributes. Perfect for remote sensing analysis, urban planning, environmental monitoring, and geospatial segmentation tasks. Optimized for NVIDIA GPU, Apple Silicon, and multi-core CPU processing with intelligent model selection for optimal performance on any hardware.
+
+version=1.2.2
+author=Ofer Butbega
+email=bkst.dev@gmail.com
+
+tracker=https://github.com/espressouk/GeoOSAM/issues
+repository=https://github.com/espressouk/GeoOSAM
+homepage=https://github.com/espressouk/GeoOSAM
+
+# Detailed tags for discoverability
+tags=python,segmentation,AI,SAM,SAM2,SAM2.1,SAM2.1_B,Ultralytics,machine learning,deep learning,computer vision,remote sensing,satellite imagery,urban planning,environmental monitoring,geospatial analysis,object detection,semantic segmentation,GPU acceleration,CUDA,Apple Silicon,pytorch,raster analysis,GIS,intelligent model selection,performance optimization
+
+category=Raster
+icon=icon.png
+
+# Plugin status
+experimental=False
+deprecated=False
+approved=False
+
+# Server and processing
+hasProcessingProvider=no
+server=False
+
+# Plugin dependencies and requirements
+plugin_dependencies=
+
+# Changelog (REQUIRED for updates)
+changelog=1.2.2 - Threading Configuration Fix
+    - FIXED: PyTorch threading initialization error when other plugins pre-configure threads
+    - FIXED: "cannot set number of interop threads" RuntimeError on plugin startup
+    - Enhanced thread configuration with graceful fallback for pre-initialized environments
+    - Improved compatibility with other PyTorch-based QGIS plugins
+
+    1.2.1 - Online Tile Layer Support
+    - NEW: Support for online tile services (XYZ, WMS, WMTS)
+    - NEW: Works with ESRI, Google Satellite, Bing Aerial
+    - NEW: Automatic tile caching with proper georeferencing
+    
+    1.2.0 - Multi-spectral UAV Support with Comprehensive Object Detection
+    - NEW: Native multi-spectral UAV/satellite imagery support (5+ bands)
+    - NEW: Automatic NDVI calculation for vegetation detection using NIR/Red bands
+    - NEW: Enhanced batch processing with up to 100 objects for vegetation
+    - NEW: Intelligent shape filtering to reject roads/tracks in vegetation detection
+    - NEW: Dual processing path - RGB for SAM2, full spectral for vegetation analysis
+    - NEW: Specialized detection helpers for Agriculture, Road, Vehicle, Water, Vessels, and General classes
+    - NEW: Non-blocking queue system - submit multiple requests without waiting
+    - NEW: Class-specific validation and detection algorithms optimized for each object type
+    - FIXED: High-resolution reflectance value preservation (0-1 range) and data type truncation
+    - FIXED: SAM2 tensor mismatch errors with multi-spectral input
+    - FIXED: Vessels detection shoreline noise with strict size validation (>5000px rejection)
+    - FIXED: Oversized mask validation (rejects masks >10%% of image area)
+    - FIXED: Crash prevention with robust processing state management
+    - FIXED: Shape attribute renamed from 'class_name' to 'class' for consistency
+    - FIXED: Mathematical warnings in texture calculation
+    - ENHANCED: Vegetation detection with aspect ratio and solidity filtering
+    - ENHANCED: Sequential processing with queue status feedback and position tracking
+    - ENHANCED: Point and batch mode validation consistency
+    - IMPROVED: Comprehensive logging for debugging high-resolution imagery issues
+    - IMPROVED: User experience with rapid clicking support and clear status messages
+    
+    1.1.0 - Major Bug Fixes and GUI Improvements
+    - FIXED: Multiple raster layer support - segmentation now works with selected raster layer
+    - FIXED: Resolved "point is out of raster bounds" exception with multiple rasters loaded (must be same CRS)
+    - FIXED: Panel focus management - controls properly lose focus after use
+    - FIXED: Space key no longer re-triggers last clicked button
+    - FIXED: Added close/minimize button to control panel header
+    - FIXED: Font display issues on Hi-DPI screens
+    - FIXED: Enabled bounding box selection mode for rectangular area prompts
+    - NEW: Refined GUI with improved user interface design
+    - NEW: Flexible panel width for better screen adaptation
+    - Enhanced panel layout and control positioning
+    - Improved keyboard event filtering and focus handling
+    - Better multi-raster workflow support
+    - Enhanced user experience with cleaner interface elements
+    - Improved cross-platform UI compatibility
+    - General stability and usability improvements
+    
+    1.0.0 - Major Update with Intelligent Model Selection
+    - Intelligent model selection: SAM 2.1 for GPU, Ultralytics SAM2.1_B for CPU
+    - Exceptional CPU performance: Sub-second segmentation on high-core systems (24+ cores)
+    - Enhanced CPU performance with Ultralytics SAM2.1_B integration (5-30x speedup)
+    - Automatic device detection (CUDA/Apple Silicon/CPU) with optimal model selection
+    - SAM 2.1 support with improved accuracy for small objects and occlusion handling
+    - Intelligent threading optimization: High-core CPUs (16+) use 75%% of cores for maximum throughput
+    - Multi-threaded processing for responsive UI during inference
+    - Point and BBox segmentation modes with adaptive processing
+    - 12 pre-defined classes + custom class creation with color coding
+    - Vehicle and Ship classes for transportation and maritime analysis
+    - Undo functionality for mistake correction with polygon-level tracking
+    - Custom output folder selection with user-configurable paths
+    - Optional debug mask saving (disabled by default for performance)
+    - Automatic raster layer re-selection for streamlined workflow
+    - Professional shapefile export with detailed attributes and metadata
+    - Performance optimization based on zoom level and hardware capabilities
+    - Comprehensive error handling and user feedback system
+    - Professional workflow features optimized for GIS analysis
+    - Updated dependencies: torch, torchvision, ultralytics, opencv-python, rasterio, shapely, hydra-core
+    - Automatic model downloading: Ultralytics handles SAM2.1_B, plugin manages SAM 2.1.
+    - Enhanced memory management and processing efficiency
+    - Cross-platform compatibility with Windows, macOS, and Linux
+
+# Update and support information
+update_date=2025-09-20
