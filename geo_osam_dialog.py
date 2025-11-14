@@ -22,6 +22,7 @@ import subprocess
 import urllib.request
 import tempfile
 import math
+import json
 from PIL import Image
 from qgis.PyQt.QtCore import QVariant, Qt, QThread, pyqtSignal
 from qgis.core import (
@@ -3786,6 +3787,225 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
             if layer.isEditable():
                 layer.rollBack()
 
+    def _extract_feature_crop_and_bbox(self, feature, raster_layer, crop_size=1024):
+        """
+        Extract a crop_size x crop_size pixel crop centered on the feature's bbox center,
+        and calculate the bbox coordinates relative to this crop.
+
+        Args:
+            feature: QgsFeature - the segmented feature
+            raster_layer: QgsRasterLayer - the source raster layer
+            crop_size: int - the size of the square crop (default 1024)
+
+        Returns:
+            dict: {
+                'image': np.ndarray - the cropped image (crop_size x crop_size x 3)
+                'bbox': [x_min, y_min, x_max, y_max] - bbox in crop coordinates
+                'geo_bbox': QgsRectangle - original geographic bbox
+                'center': [x, y] - bbox center in geographic coordinates
+            }
+            or None if extraction fails
+        """
+        try:
+            # Get feature's bounding box in geographic coordinates
+            geom = feature.geometry()
+            if geom.isNull() or geom.isEmpty():
+                return None
+
+            geo_bbox = geom.boundingBox()
+
+            # Calculate bbox center
+            center_x = (geo_bbox.xMinimum() + geo_bbox.xMaximum()) / 2.0
+            center_y = (geo_bbox.yMinimum() + geo_bbox.yMaximum()) / 2.0
+
+            # Get raster source path
+            raster_path = raster_layer.source()
+
+            # Open raster and extract crop
+            with rasterio.open(raster_path) as src:
+                # Convert center to pixel coordinates
+                center_col, center_row = ~src.transform * (center_x, center_y)
+                center_col = int(center_col)
+                center_row = int(center_row)
+
+                # Calculate crop window (centered on bbox center)
+                half_size = crop_size // 2
+                x_min = max(0, center_col - half_size)
+                y_min = max(0, center_row - half_size)
+                x_max = min(src.width, center_col + half_size)
+                y_max = min(src.height, center_row + half_size)
+
+                # Create window
+                window = rasterio.windows.Window(
+                    x_min, y_min, x_max - x_min, y_max - y_min
+                )
+
+                # Read bands
+                band_count = src.count
+                if band_count >= 3:
+                    bands_to_read = [1, 2, 3]
+                elif band_count == 2:
+                    bands_to_read = [1, 1, 2]
+                else:
+                    bands_to_read = [1, 1, 1]
+
+                # Read image data
+                arr = src.read(bands_to_read, window=window, out_dtype=np.uint8)
+                arr = np.moveaxis(arr, 0, -1)  # Convert to HWC format
+
+                # Normalize
+                if arr.max() > arr.min():
+                    arr_min, arr_max = arr.min(), arr.max()
+                    arr = ((arr.astype(np.float32) - arr_min) /
+                           (arr_max - arr_min) * 255).astype(np.uint8)
+
+                # Pad if crop is smaller than crop_size
+                actual_height, actual_width = arr.shape[:2]
+                if actual_height < crop_size or actual_width < crop_size:
+                    padded = np.zeros((crop_size, crop_size, 3), dtype=np.uint8)
+                    padded[:actual_height, :actual_width, :] = arr
+                    arr = padded
+
+                # Convert feature bbox corners to pixel coordinates in the crop
+                # Get all four corners of the bbox
+                bbox_corners_geo = [
+                    (geo_bbox.xMinimum(), geo_bbox.yMinimum()),
+                    (geo_bbox.xMaximum(), geo_bbox.yMinimum()),
+                    (geo_bbox.xMaximum(), geo_bbox.yMaximum()),
+                    (geo_bbox.xMinimum(), geo_bbox.yMaximum()),
+                ]
+
+                bbox_corners_pixel = []
+                for gx, gy in bbox_corners_geo:
+                    px, py = ~src.transform * (gx, gy)
+                    # Convert to crop coordinates
+                    crop_x = int(px) - x_min
+                    crop_y = int(py) - y_min
+                    bbox_corners_pixel.append((crop_x, crop_y))
+
+                # Calculate bbox bounds in crop coordinates
+                bbox_x_coords = [p[0] for p in bbox_corners_pixel]
+                bbox_y_coords = [p[1] for p in bbox_corners_pixel]
+
+                bbox_crop = [
+                    max(0, min(bbox_x_coords)),  # x_min
+                    max(0, min(bbox_y_coords)),  # y_min
+                    min(crop_size, max(bbox_x_coords)),  # x_max
+                    min(crop_size, max(bbox_y_coords))   # y_max
+                ]
+
+                return {
+                    'image': arr,
+                    'bbox': bbox_crop,
+                    'geo_bbox': geo_bbox,
+                    'center': [center_x, center_y],
+                    'crop_window': {
+                        'pixel_bounds': [x_min, y_min, x_max, y_max],
+                        'size': [actual_width, actual_height]
+                    }
+                }
+
+        except Exception as e:
+            print(f"❌ Error extracting crop for feature: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _export_layer_with_crops(self, layer, class_name, raster_layer=None,
+                                  export_crops=True, crop_size=1024):
+        """
+        Export layer to shapefile and optionally save crops and bbox info for each feature.
+
+        Args:
+            layer: QgsVectorLayer - the layer to export
+            class_name: str - the class name
+            raster_layer: QgsRasterLayer - source raster for crops (if None, uses active layer)
+            export_crops: bool - whether to export crops and bbox info
+            crop_size: int - size of the square crop in pixels
+
+        Returns:
+            bool: True if export succeeded, False otherwise
+        """
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            shapefile_name = f"SAM_{class_name}_{timestamp}.shp"
+            shapefile_path = str(self.shapefile_save_dir / shapefile_name)
+
+            # Export shapefile
+            error = QgsVectorFileWriter.writeAsVectorFormat(
+                layer, shapefile_path, "utf-8", layer.crs(), "ESRI Shapefile")
+
+            if error[0] != QgsVectorFileWriter.NoError:
+                print(f"❌ Export failed for {class_name}: {error}")
+                return False
+
+            print(f"💾 Exported {class_name}: {shapefile_path}")
+
+            # Export crops and bbox if requested
+            if export_crops and raster_layer is not None:
+                crops_dir = self.shapefile_save_dir / f"SAM_{class_name}_{timestamp}_crops"
+                crops_dir.mkdir(exist_ok=True)
+
+                bbox_data = []
+                success_count = 0
+
+                print(f"📸 Extracting {crop_size}x{crop_size} crops for {layer.featureCount()} features...")
+
+                for idx, feature in enumerate(layer.getFeatures()):
+                    crop_result = self._extract_feature_crop_and_bbox(
+                        feature, raster_layer, crop_size
+                    )
+
+                    if crop_result is None:
+                        print(f"⚠️ Skipping feature {idx} - extraction failed")
+                        continue
+
+                    # Save crop image
+                    image_filename = f"feature_{idx:04d}.png"
+                    image_path = crops_dir / image_filename
+
+                    try:
+                        img = Image.fromarray(crop_result['image'])
+                        img.save(str(image_path))
+                    except Exception as e:
+                        print(f"⚠️ Failed to save image for feature {idx}: {e}")
+                        continue
+
+                    # Store bbox info
+                    bbox_info = {
+                        'feature_id': idx,
+                        'image_file': image_filename,
+                        'bbox_crop_coords': crop_result['bbox'],  # [x_min, y_min, x_max, y_max]
+                        'bbox_width': crop_result['bbox'][2] - crop_result['bbox'][0],
+                        'bbox_height': crop_result['bbox'][3] - crop_result['bbox'][1],
+                        'geo_bbox': {
+                            'xmin': crop_result['geo_bbox'].xMinimum(),
+                            'ymin': crop_result['geo_bbox'].yMinimum(),
+                            'xmax': crop_result['geo_bbox'].xMaximum(),
+                            'ymax': crop_result['geo_bbox'].yMaximum(),
+                        },
+                        'center_geo': crop_result['center'],
+                        'crop_size': crop_size,
+                    }
+                    bbox_data.append(bbox_info)
+                    success_count += 1
+
+                # Save bbox data as JSON
+                bbox_json_path = crops_dir / "bbox_info.json"
+                with open(str(bbox_json_path), 'w', encoding='utf-8') as f:
+                    json.dump(bbox_data, f, indent=2, ensure_ascii=False)
+
+                print(f"✅ Saved {success_count} crops and bbox info to: {crops_dir}")
+                print(f"📄 Bbox info saved to: {bbox_json_path}")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Export error for {class_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def _export_all_classes(self):
         # Collect all SAM layers from both tracked dict and QGIS project
         layers_to_export = {}
@@ -3850,9 +4070,26 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
             self._update_status("No segments to export!", "warning")
             return
 
+        # Get the source raster layer for crop extraction
+        raster_layer = None
+        if hasattr(self, 'original_raster_layer') and self.original_raster_layer:
+            raster_layer = self.original_raster_layer
+        else:
+            # Try to find active raster layer
+            active_layer = self.iface.activeLayer()
+            if isinstance(active_layer, QgsRasterLayer):
+                raster_layer = active_layer
+
+        if raster_layer:
+            print(f"   📸 Using raster layer for crops: {raster_layer.name()}")
+        else:
+            print(f"   ⚠️ No raster layer found - will export shapefiles only")
+
         exported_count = 0
         for class_name, layer in layers_to_export.items():
-            if self._export_layer_to_shapefile(layer, class_name):
+            # Use the new export function with crop extraction
+            if self._export_layer_with_crops(layer, class_name, raster_layer,
+                                            export_crops=True, crop_size=1024):
                 exported_count += 1
 
         if exported_count > 0:
