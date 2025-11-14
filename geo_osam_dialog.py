@@ -3790,7 +3790,7 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
     def _extract_feature_crop_and_bbox(self, feature, raster_layer, crop_size=1024):
         """
         Extract a crop_size x crop_size pixel crop centered on the feature's bbox center,
-        and calculate the bbox coordinates relative to this crop.
+        calculate the bbox coordinates relative to this crop, and generate a mask.
 
         Args:
             feature: QgsFeature - the segmented feature
@@ -3800,9 +3800,12 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
         Returns:
             dict: {
                 'image': np.ndarray - the cropped image (crop_size x crop_size x 3)
+                'mask': np.ndarray - the binary mask (crop_size x crop_size), 255 for object, 0 for background
                 'bbox': [x_min, y_min, x_max, y_max] - bbox in crop coordinates
                 'geo_bbox': QgsRectangle - original geographic bbox
                 'center': [x, y] - bbox center in geographic coordinates
+                'mask_area': int - number of mask pixels
+                'mask_ratio': float - ratio of mask pixels to crop area
             }
             or None if extraction fails
         """
@@ -3894,15 +3897,65 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
                     min(crop_size, max(bbox_y_coords))   # y_max
                 ]
 
+                # Generate mask in crop coordinates
+                mask = np.zeros((crop_size, crop_size), dtype=np.uint8)
+
+                # Convert geometry to polygon coordinates in crop space
+                if geom.isMultipart():
+                    polygons = geom.asMultiPolygon()
+                else:
+                    polygons = [geom.asPolygon()]
+
+                # Draw all polygons on the mask
+                for polygon in polygons:
+                    if not polygon:
+                        continue
+
+                    # Process exterior ring
+                    exterior_points = []
+                    for point in polygon[0]:  # polygon[0] is the exterior ring
+                        # Convert geographic coords to raster pixel coords
+                        px, py = ~src.transform * (point.x(), point.y())
+                        # Convert to crop coordinates
+                        crop_x = int(px) - x_min
+                        crop_y = int(py) - y_min
+                        exterior_points.append([crop_x, crop_y])
+
+                    if len(exterior_points) >= 3:
+                        # Draw filled polygon
+                        pts = np.array(exterior_points, dtype=np.int32)
+                        cv2.fillPoly(mask, [pts], 255)
+
+                    # Process holes (interior rings)
+                    for hole_idx in range(1, len(polygon)):
+                        hole_points = []
+                        for point in polygon[hole_idx]:
+                            px, py = ~src.transform * (point.x(), point.y())
+                            crop_x = int(px) - x_min
+                            crop_y = int(py) - y_min
+                            hole_points.append([crop_x, crop_y])
+
+                        if len(hole_points) >= 3:
+                            # Draw holes as black (0)
+                            pts = np.array(hole_points, dtype=np.int32)
+                            cv2.fillPoly(mask, [pts], 0)
+
+                # Calculate mask statistics
+                mask_area = int(np.sum(mask > 0))
+                mask_ratio = float(mask_area) / (crop_size * crop_size)
+
                 return {
                     'image': arr,
+                    'mask': mask,
                     'bbox': bbox_crop,
                     'geo_bbox': geo_bbox,
                     'center': [center_x, center_y],
                     'crop_window': {
                         'pixel_bounds': [x_min, y_min, x_max, y_max],
                         'size': [actual_width, actual_height]
-                    }
+                    },
+                    'mask_area': mask_area,
+                    'mask_ratio': mask_ratio
                 }
 
         except Exception as e:
@@ -3914,13 +3967,13 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
     def _export_layer_with_crops(self, layer, class_name, raster_layer=None,
                                   export_crops=True, crop_size=1024):
         """
-        Export layer to shapefile and optionally save crops and bbox info for each feature.
+        Export layer to shapefile and optionally save crops, masks and bbox info for each feature.
 
         Args:
             layer: QgsVectorLayer - the layer to export
             class_name: str - the class name
             raster_layer: QgsRasterLayer - source raster for crops (if None, uses active layer)
-            export_crops: bool - whether to export crops and bbox info
+            export_crops: bool - whether to export crops, masks and bbox info
             crop_size: int - size of the square crop in pixels
 
         Returns:
@@ -3941,7 +3994,7 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
 
             print(f"💾 Exported {class_name}: {shapefile_path}")
 
-            # Export crops and bbox if requested
+            # Export crops, masks and bbox if requested
             if export_crops and raster_layer is not None:
                 crops_dir = self.shapefile_save_dir / f"SAM_{class_name}_{timestamp}_crops"
                 crops_dir.mkdir(exist_ok=True)
@@ -3949,7 +4002,7 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
                 bbox_data = []
                 success_count = 0
 
-                print(f"📸 Extracting {crop_size}x{crop_size} crops for {layer.featureCount()} features...")
+                print(f"📸 Extracting {crop_size}x{crop_size} crops and masks for {layer.featureCount()} features...")
 
                 for idx, feature in enumerate(layer.getFeatures()):
                     crop_result = self._extract_feature_crop_and_bbox(
@@ -3964,17 +4017,28 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
                     image_filename = f"feature_{idx:04d}.png"
                     image_path = crops_dir / image_filename
 
+                    # Save mask image
+                    mask_filename = f"feature_{idx:04d}_mask.png"
+                    mask_path = crops_dir / mask_filename
+
                     try:
+                        # Save RGB crop
                         img = Image.fromarray(crop_result['image'])
                         img.save(str(image_path))
+
+                        # Save mask (grayscale)
+                        mask_img = Image.fromarray(crop_result['mask'])
+                        mask_img.save(str(mask_path))
+
                     except Exception as e:
-                        print(f"⚠️ Failed to save image for feature {idx}: {e}")
+                        print(f"⚠️ Failed to save images for feature {idx}: {e}")
                         continue
 
-                    # Store bbox info
+                    # Store bbox and mask info
                     bbox_info = {
                         'feature_id': idx,
                         'image_file': image_filename,
+                        'mask_file': mask_filename,
                         'bbox_crop_coords': crop_result['bbox'],  # [x_min, y_min, x_max, y_max]
                         'bbox_width': crop_result['bbox'][2] - crop_result['bbox'][0],
                         'bbox_height': crop_result['bbox'][3] - crop_result['bbox'][1],
@@ -3986,6 +4050,13 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
                         },
                         'center_geo': crop_result['center'],
                         'crop_size': crop_size,
+                        'mask_area': crop_result['mask_area'],
+                        'mask_ratio': crop_result['mask_ratio'],
+                        'mask_bbox_ratio': float(crop_result['mask_area']) / (
+                            (crop_result['bbox'][2] - crop_result['bbox'][0]) *
+                            (crop_result['bbox'][3] - crop_result['bbox'][1])
+                        ) if (crop_result['bbox'][2] > crop_result['bbox'][0] and
+                              crop_result['bbox'][3] > crop_result['bbox'][1]) else 0.0
                     }
                     bbox_data.append(bbox_info)
                     success_count += 1
@@ -3995,7 +4066,7 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
                 with open(str(bbox_json_path), 'w', encoding='utf-8') as f:
                     json.dump(bbox_data, f, indent=2, ensure_ascii=False)
 
-                print(f"✅ Saved {success_count} crops and bbox info to: {crops_dir}")
+                print(f"✅ Saved {success_count} crops, masks and bbox info to: {crops_dir}")
                 print(f"📄 Bbox info saved to: {bbox_json_path}")
 
             return True
@@ -4097,26 +4168,6 @@ class GeoOSAMControlPanel(QtWidgets.QDockWidget):
                 f"💾 Exported {exported_count} class(es) to {self.shapefile_save_dir}", "info")
         else:
             self._update_status("No segments found to export!", "warning")
-
-    def _export_layer_to_shapefile(self, layer, class_name):
-        try:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            shapefile_name = f"SAM_{class_name}_{timestamp}.shp"
-            shapefile_path = str(self.shapefile_save_dir / shapefile_name)
-
-            error = QgsVectorFileWriter.writeAsVectorFormat(
-                layer, shapefile_path, "utf-8", layer.crs(), "ESRI Shapefile")
-
-            if error[0] == QgsVectorFileWriter.NoError:
-                print(f"💾 Exported {class_name}: {shapefile_path}")
-                return True
-            else:
-                print(f"❌ Export failed for {class_name}: {error}")
-                return False
-
-        except Exception as e:
-            print(f"❌ Export error for {class_name}: {e}")
-            return False
 
     def _update_stats(self):
         """Update statistics display"""
